@@ -5,6 +5,11 @@ on:
     - cron: '0 6 * * *'   # 毎日 06:00 UTC（JST 15:00）。GCAT は日次更新
   workflow_dispatch:      # 手動実行も可能
 
+# 生成した JSON をこのリポジトリにコミットするため書き込み権限が要る
+# （新規リポジトリの既定は読み取りのみで、無いと push が 403 になる）
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
