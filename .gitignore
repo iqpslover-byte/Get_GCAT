@@ -1,0 +1,5 @@
+# 元データ（19MB・毎回取り直すので保存しない）
+tools/gcat_cache/
+
+__pycache__/
+*.pyc

@@ -1,0 +1,29 @@
+name: Build GCAT Specs
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 毎日 06:00 UTC（JST 15:00）。GCAT は日次更新
+  workflow_dispatch:      # 手動実行も可能
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 依存パッケージなし（標準ライブラリの urllib だけで取得する）
+      - name: Build gcat_slim.json
+        run: python tools/build_gcat.py --refresh
+
+      - name: Commit and Push
+        run: |
+          git config --local user.email "iqps.lover@gmail.com"
+          git config --local user.name "iqpslover-byte"
+          git add data/gcat_slim.json
+          git commit -m "Update gcat_slim: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" || echo "No changes to commit"
+          git push origin main
