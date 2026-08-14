@@ -8,9 +8,11 @@
       ライセンス CC BY 4.0（帰属表示すれば自由に複製・再配布できる）
 
 やること:
-  1. satcat.tsv（約19MB）を取得して tools/gcat_cache/ に置く
+  1. satcat.tsv（約19MB）と launch.tsv（約14MB）を取得して tools/gcat_cache/ に置く
   2. 軌道上の PAYLOAD だけを抜き、アプリで使う項目に絞る
-  3. 打上げ日を YYYY-MM-DD に正規化（日付のみの項目なのでJSTは付けない）
+  3. 打上げ日を YYYY-MM-DD に正規化し、打上げ時刻(UTC・分まで)を lt に入れる
+     ★時刻は satcat.tsv に無い（LDate は日付まで）。launch.tsv 側にあるので
+       Launch_Tag で突き合わせる。秒は使わない。不確実マーク'?'付きは ltq=1 で残す
   4. 別名から GCAT 内部の分類記号（':RA' ':JP' 等）を落として読める形にする
   5. data/gcat_slim.json に書き出す（約3.5MB / gzip 0.23MB）
 
@@ -27,6 +29,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_URL = 'https://planet4589.org/space/gcat/tsv/cat/satcat.tsv'
 CACHE = os.path.join(ROOT, 'tools', 'gcat_cache', 'satcat.tsv')
 DST = os.path.join(ROOT, 'data', 'gcat_slim.json')
+
+# 打上げ「時刻」は satcat.tsv には無い（LDate は日付まで）。launch.tsv 側にあるので
+# Launch_Tag で突き合わせて拾う。Launch_Tag は TLE の国際識別子と同じ形（2023-196）。
+LAUNCH_URL = 'https://planet4589.org/space/gcat/tsv/launch/launch.tsv'
+LAUNCH_CACHE = os.path.join(ROOT, 'tools', 'gcat_cache', 'launch.tsv')
 
 # 軌道上とみなす Status（O=在軌 / OP=運用中 / GRP=構成要素 / AO=減衰中の在軌）
 ORBIT_STATUS = ('O', 'OP', 'GRP', 'AO')
@@ -68,6 +75,50 @@ def fetch(refresh=False):
     return CACHE
 
 
+def fetch_launch(refresh=False):
+    os.makedirs(os.path.dirname(LAUNCH_CACHE), exist_ok=True)
+    if refresh or not os.path.exists(LAUNCH_CACHE):
+        print('取得中: %s' % LAUNCH_URL)
+        _download(LAUNCH_URL, LAUNCH_CACHE)
+    print('元データ: %s (%.1f MB)' % (LAUNCH_CACHE, os.path.getsize(LAUNCH_CACHE) / 1048576))
+    return LAUNCH_CACHE
+
+
+def norm_time(v):
+    """'2023 Dec 15 0405:54?' → ('04:05', 1) / '2025 Jun  2 2357' → ('23:57', 0)
+       時刻を持たない（'2026 Jul 11'）なら ('', 0)。
+       ★秒は使わない＝表示は分まで。末尾の '?' は不確実マークなのでフラグで残す。"""
+    v = (v or '').strip()
+    q = 1 if '?' in v else 0
+    v = v.replace('?', '').strip()
+    m = re.match(r'^\d{4}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+(\d{2})(\d{2})', v)
+    if not m:
+        return '', 0
+    hh, mm = int(m.group(1)), int(m.group(2))
+    if hh > 23 or mm > 59:
+        return '', 0
+    return '%02d:%02d' % (hh, mm), q
+
+
+def build_launch_times(path):
+    """Launch_Tag → ('HH:MM', 不確実フラグ)。時刻を持たない打上げは入れない。"""
+    hdr, out = None, {}
+    for line in open(path, encoding='utf-8', errors='replace'):
+        if line.startswith('#Launch_Tag'):
+            hdr = line.lstrip('#').rstrip('\n').split('\t')
+            continue
+        if line.startswith('#') or not line.strip() or hdr is None:
+            continue
+        r = dict(zip(hdr, line.rstrip('\n').split('\t')))
+        tag = (r.get('Launch_Tag') or '').strip()
+        if not tag:
+            continue
+        hm, q = norm_time(r.get('Launch_Date'))
+        if hm:
+            out[tag] = (hm, q)
+    return out
+
+
 def norm_date(v):
     """'2023 Dec 15' → '2023-12-15' / '2023 Dec' → '2023-12' / '2023' → '2023'。
        不確実マーク '?' は落とす。読めなければ空。"""
@@ -104,7 +155,8 @@ def num(r, k):
         return None
 
 
-def build(path):
+def build(path, ltimes=None):
+    ltimes = ltimes or {}
     hdr, out = None, {}
     for line in open(path, encoding='utf-8', errors='replace'):
         if line.startswith('#JCAT'):
@@ -137,6 +189,13 @@ def build(path):
         ld = norm_date(g(r, 'LDate'))
         if ld:
             d['ld'] = ld
+            # 打上げ時刻（UTC・分まで）。日付が YYYY-MM-DD まで確定している時だけ付ける
+            # ＝月までしか分からない衛星に時刻を付けても意味がないため。
+            lt = ltimes.get(g(r, 'Launch_Tag'))
+            if lt and len(ld) == 10:
+                d['lt'] = lt[0]
+                if lt[1]:
+                    d['ltq'] = 1                                     # 打上げ時刻は不確実
         alt = clean_alt(g(r, 'AltNames'))
         if alt:
             d['alt'] = alt
@@ -145,15 +204,20 @@ def build(path):
 
 
 def main():
-    out = build(fetch('--refresh' in sys.argv))
+    refresh = '--refresh' in sys.argv
+    ltimes = build_launch_times(fetch_launch(refresh))
+    print('打上げ時刻: %d件（時刻を持つ打上げ）' % len(ltimes))
+    out = build(fetch(refresh), ltimes)
     s = json.dumps(out, ensure_ascii=False, separators=(',', ':'))
     os.makedirs(os.path.dirname(DST), exist_ok=True)
     with open(DST, 'w', encoding='utf-8', newline='') as f:
         f.write(s)
+    nlt = sum(1 for v in out.values() if 'lt' in v)
     print('出力: %s' % DST)
     print('  %d件 / %.2f MB (gzip %.2f MB)'
           % (len(out), len(s.encode('utf-8')) / 1048576,
              len(gzip.compress(s.encode('utf-8'))) / 1048576))
+    print('  うち打上げ時刻あり: %d件 (%.1f%%)' % (nlt, 100.0 * nlt / max(1, len(out))))
 
 
 if __name__ == '__main__':
