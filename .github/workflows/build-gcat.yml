@@ -22,13 +22,13 @@ jobs:
           python-version: '3.11'
 
       # 依存パッケージなし（標準ライブラリの urllib だけで取得する）
-      - name: Build gcat_slim.json
+      - name: Build gcat_slim.json / lv_index.json
         run: python tools/build_gcat.py --refresh
 
       - name: Commit and Push
         run: |
           git config --local user.email "iqps.lover@gmail.com"
           git config --local user.name "iqpslover-byte"
-          git add data/gcat_slim.json
-          git commit -m "Update gcat_slim: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" || echo "No changes to commit"
+          git add data/
+          git commit -m "Update GCAT data: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" || echo "No changes to commit"
           git push origin main

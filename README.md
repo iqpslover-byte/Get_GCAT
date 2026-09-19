@@ -5,7 +5,9 @@ GCAT の衛星カタログから**軌道上の PAYLOAD の諸元だけ**を抜�
 
 ## 出力
 
-`data/gcat_slim.json` … 約 18,700 件 / 3.5MB（gzip 0.23MB）
+### `data/gcat_slim.json` … 機体諸元
+
+約 18,700 件 / 3.7MB（gzip 0.25MB）。軌道上の PAYLOAD だけが入ります。
 
 NORAD 番号（ゼロ埋めなし）をキーにした辞書です。
 
@@ -29,6 +31,29 @@ NORAD 番号（ゼロ埋めなし）をキーにした辞書です。
 
 値が無い項目はキーごと省かれます。
 
+### `data/lv_index.json` … 打上げ機の索引
+
+約 69,400 件 / 0.8MB（gzip 0.18MB）。**衛星だけでなくロケット体・デブリも**入ります
+（アプリの衛星カタログが全オブジェクトを載せているため）。
+
+同じロケット名を何万回も書かずに済むよう、3つに畳んであります。
+
+```json
+{
+  "fam": ["Electron", "H-II", "Falcon 9"],
+  "lv":  [["Electron", 0], ["H-IIA 202", 1], ["H-IIB", 1]],
+  "map": { "58578": 0, "42917": 1 }
+}
+```
+
+| キー | 内容 |
+|---|---|
+| `fam` | ロケットのファミリー名（`H-IIA 202` と `H-IIB` をまとめた `H-II`）|
+| `lv` | `[形態名, fam の番号]`。形態名は GCAT の `LV_Type` |
+| `map` | NORAD 番号 → `lv` の番号 |
+
+打上げ機が分からないオブジェクトは `map` に入れません（キーが無い＝不明）。
+
 ## 更新
 
 `.github/workflows/build-gcat.yml` が毎日 06:00 UTC（JST 15:00）に実行され、
@@ -43,10 +68,11 @@ python tools/build_gcat.py --refresh
 ## 出典・ライセンス
 
 データ元は **[GCAT: General Catalog of Artificial Space Objects](https://planet4589.org/space/gcat/)**
-（Jonathan C. McDowell 氏）の `tsv/cat/satcat.tsv` です。
+（Jonathan C. McDowell 氏）の `tsv/cat/satcat.tsv`・`tsv/launch/launch.tsv`・
+`tsv/tables/lv.tsv` です。
 
 GCAT は **[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)** で提供されており、
-帰属を示せば複製・改変・再配布ができます。本リポジトリの `data/gcat_slim.json` は
+帰属を示せば複製・改変・再配布ができます。本リポジトリの `data/` 以下は
 GCAT から項目を抜粋・整形した派生物であり、同じく CC BY 4.0 で提供します。
 
 > McDowell, Jonathan C., *General Catalog of Artificial Space Objects*,

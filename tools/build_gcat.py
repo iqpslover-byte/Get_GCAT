@@ -15,6 +15,10 @@
        Launch_Tag で突き合わせる。秒は使わない。不確実マーク'?'付きは ltq=1 で残す
   4. 別名から GCAT 内部の分類記号（':RA' ':JP' 等）を落として読める形にする
   5. data/gcat_slim.json に書き出す（約3.5MB / gzip 0.23MB）
+  6. 打上げ機の索引 data/lv_index.json を書き出す
+     ★こちらは PAYLOAD に限らず全オブジェクト（ロケット体・デブリ込み）を入れる。
+       アプリの衛星カタログが全オブジェクトを載せているので、ロケットで絞り込んだ
+       一覧に「打上げ機が不明」の行が混じらないようにするため。
 
 将来 Get_GCAT リポジトリに移す時は、このファイルをそのまま持っていけばよい。
 """
@@ -34,6 +38,12 @@ DST = os.path.join(ROOT, 'data', 'gcat_slim.json')
 # Launch_Tag で突き合わせて拾う。Launch_Tag は TLE の国際識別子と同じ形（2023-196）。
 LAUNCH_URL = 'https://planet4589.org/space/gcat/tsv/launch/launch.tsv'
 LAUNCH_CACHE = os.path.join(ROOT, 'tools', 'gcat_cache', 'launch.tsv')
+
+# 打上げ機の一覧。LV_Type（'H-IIA 202' のような形態名）を GenericName（'H-II'）へ
+# まとめるために使う。0.2MB と小さい。
+LV_URL = 'https://planet4589.org/space/gcat/tsv/tables/lv.tsv'
+LV_CACHE = os.path.join(ROOT, 'tools', 'gcat_cache', 'lv.tsv')
+LVX_DST = os.path.join(ROOT, 'data', 'lv_index.json')
 
 # 軌道上とみなす Status（O=在軌 / OP=運用中 / GRP=構成要素 / AO=減衰中の在軌）
 ORBIT_STATUS = ('O', 'OP', 'GRP', 'AO')
@@ -84,6 +94,15 @@ def fetch_launch(refresh=False):
     return LAUNCH_CACHE
 
 
+def fetch_lv(refresh=False):
+    os.makedirs(os.path.dirname(LV_CACHE), exist_ok=True)
+    if refresh or not os.path.exists(LV_CACHE):
+        print('取得中: %s' % LV_URL)
+        _download(LV_URL, LV_CACHE)
+    print('元データ: %s (%.1f MB)' % (LV_CACHE, os.path.getsize(LV_CACHE) / 1048576))
+    return LV_CACHE
+
+
 def norm_time(v):
     """'2023 Dec 15 0405:54?' → ('04:05', 1) / '2025 Jun  2 2357' → ('23:57', 0)
        時刻を持たない（'2026 Jul 11'）なら ('', 0)。
@@ -100,9 +119,11 @@ def norm_time(v):
     return '%02d:%02d' % (hh, mm), q
 
 
-def build_launch_times(path):
-    """Launch_Tag → ('HH:MM', 不確実フラグ)。時刻を持たない打上げは入れない。"""
-    hdr, out = None, {}
+def build_launch_info(path):
+    """launch.tsv を1回読んで、Launch_Tag 別に2つ拾う。
+         時刻 … ('HH:MM', 不確実フラグ)。時刻を持たない打上げは入れない。
+         打上げ機 … LV_Type（'H-IIA 202' のような形態名）。'-' は入れない。"""
+    hdr, out, lvs = None, {}, {}
     for line in open(path, encoding='utf-8', errors='replace'):
         if line.startswith('#Launch_Tag'):
             hdr = line.lstrip('#').rstrip('\n').split('\t')
@@ -116,7 +137,10 @@ def build_launch_times(path):
         hm, q = norm_time(r.get('Launch_Date'))
         if hm:
             out[tag] = (hm, q)
-    return out
+        lv = (r.get('LV_Type') or '').strip()
+        if lv and lv != '-':
+            lvs[tag] = lv
+    return out, lvs
 
 
 def norm_date(v):
@@ -203,11 +227,67 @@ def build(path, ltimes=None):
     return out
 
 
+def build_lv_family(path):
+    """lv.tsv から LV_Name → GenericName（系統でまとめた呼び名）。
+       'H-IIA 202'→'H-II' / 'H3-22S'→'H3' / 'Electron'→'Electron'。
+       同じ LV_Name が Variant ごとに何行も出るので、最初に出た行を採る。"""
+    hdr, out = None, {}
+    for line in open(path, encoding='utf-8', errors='replace'):
+        if line.startswith('#LV_Name'):
+            hdr = line.lstrip('#').rstrip('\n').split('\t')
+            continue
+        if line.startswith('#') or not line.strip() or hdr is None:
+            continue
+        r = dict(zip(hdr, line.rstrip('\n').split('\t')))
+        name = (r.get('LV_Name') or '').strip()
+        fam = (r.get('GenericName') or '').strip()
+        if name and fam and fam != '-' and name not in out:
+            out[name] = fam
+    return out
+
+
+def build_lv_index(path, lvs, fams):
+    """NORAD番号 → 打上げ機の索引。PAYLOAD に限らず全オブジェクトを入れる。
+
+       同じ名前を何万回も書かないよう、3つに分けて畳む:
+         fam … ファミリー名の一覧          ["Electron", "H-II", ...]
+         lv  … [形態名, ファミリーの番号]   [["H-IIA 202", 1], ...]
+         map … NORAD番号 → lv の番号        {"58578": 0, ...}
+       ファミリー名を持たない機（GCATの GenericName が '-'）は形態名をそのまま使う。"""
+    hdr = None
+    fam_idx, fam_list, lv_idx, lv_list, out = {}, [], {}, [], {}
+    for line in open(path, encoding='utf-8', errors='replace'):
+        if line.startswith('#JCAT'):
+            hdr = line.rstrip('\n').split('\t')
+            continue
+        if line.startswith('#') or not line.strip() or hdr is None:
+            continue
+        r = dict(zip(hdr, line.rstrip('\n').split('\t')))
+        n = g(r, 'Satcat').lstrip('0')                               # NORAD番号(ゼロ埋めなし)
+        if not n.isdigit():
+            continue
+        lv = lvs.get(g(r, 'Launch_Tag'))
+        if not lv:
+            continue
+        if lv not in lv_idx:
+            fam = fams.get(lv) or lv
+            if fam not in fam_idx:
+                fam_idx[fam] = len(fam_list)
+                fam_list.append(fam)
+            lv_idx[lv] = len(lv_list)
+            lv_list.append([lv, fam_idx[fam]])
+        out[n] = lv_idx[lv]
+    return {'fam': fam_list, 'lv': lv_list, 'map': out}
+
+
 def main():
     refresh = '--refresh' in sys.argv
-    ltimes = build_launch_times(fetch_launch(refresh))
+    ltimes, lvtypes = build_launch_info(fetch_launch(refresh))
     print('打上げ時刻: %d件（時刻を持つ打上げ）' % len(ltimes))
-    out = build(fetch(refresh), ltimes)
+    print('打上げ機: %d件（機種の分かる打上げ）' % len(lvtypes))
+    fams = build_lv_family(fetch_lv(refresh))
+    src = fetch(refresh)
+    out = build(src, ltimes)
     s = json.dumps(out, ensure_ascii=False, separators=(',', ':'))
     os.makedirs(os.path.dirname(DST), exist_ok=True)
     with open(DST, 'w', encoding='utf-8', newline='') as f:
@@ -218,6 +298,16 @@ def main():
           % (len(out), len(s.encode('utf-8')) / 1048576,
              len(gzip.compress(s.encode('utf-8'))) / 1048576))
     print('  うち打上げ時刻あり: %d件 (%.1f%%)' % (nlt, 100.0 * nlt / max(1, len(out))))
+
+    lvx = build_lv_index(src, lvtypes, fams)
+    s2 = json.dumps(lvx, ensure_ascii=False, separators=(',', ':'))
+    with open(LVX_DST, 'w', encoding='utf-8', newline='') as f:
+        f.write(s2)
+    print('出力: %s' % LVX_DST)
+    print('  %d件 / ロケット%d種(ファミリー%d種) / %.2f MB (gzip %.2f MB)'
+          % (len(lvx['map']), len(lvx['lv']), len(lvx['fam']),
+             len(s2.encode('utf-8')) / 1048576,
+             len(gzip.compress(s2.encode('utf-8'))) / 1048576))
 
 
 if __name__ == '__main__':
