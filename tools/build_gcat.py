@@ -45,6 +45,11 @@ LV_URL = 'https://planet4589.org/space/gcat/tsv/tables/lv.tsv'
 LV_CACHE = os.path.join(ROOT, 'tools', 'gcat_cache', 'lv.tsv')
 LVX_DST = os.path.join(ROOT, 'data', 'lv_index.json')
 
+# 軌道打上げの Launch_Tag の形（国際識別子と同じ 2026-192）。観測ロケットは 'YYYY XXX' 形式。
+TAG_RE = re.compile(r'^\d{4}-\d{3}$')
+# 国際識別子の形の Piece（1998-067XZ）。頭の打上げ番号を取り出す。
+PIECE_RE = re.compile(r'^(\d{4}-\d{3})[A-Z]*$')
+
 # 軌道上とみなす Status（O=在軌 / OP=運用中 / GRP=構成要素 / AO=減衰中の在軌）
 ORBIT_STATUS = ('O', 'OP', 'GRP', 'AO')
 
@@ -253,9 +258,32 @@ def build_lv_index(path, lvs, fams):
          fam … ファミリー名の一覧          ["Electron", "H-II", ...]
          lv  … [形態名, ファミリーの番号]   [["H-IIA 202", 1], ...]
          map … NORAD番号 → lv の番号        {"58578": 0, ...}
-       ファミリー名を持たない機（GCATの GenericName が '-'）は形態名をそのまま使う。"""
+         tag … 打上げ番号 → lv の番号       {"2026-192": 0, ...}
+       ファミリー名を持たない機（GCATの GenericName が '-'）は形態名をそのまま使う。
+
+       ★tag は「SATCATに載る前の新着」を拾うための保険。GCATが個々の物体を登録するまで
+         数日かかるので、その間 map では引けない（実測で1,282件＝直近1か月ぶん）。
+         国際識別子の頭8文字（2026-192R → 2026-192）で引けば1,281件が埋まる。
+       ★使う側は必ず map を先に見ること。ISS から放出された衛星は国際識別子が
+         1998-067xx（Zarya の打上げ）なので、tag だけで引くと567件が Proton-K に化ける。
+         map なら運んだ機体（Falcon 9・H-IIB・Space Shuttle…）が正しく出る。
+       ★さらに、その 1998-067 自体を tag から外す。map で引けない新着（＝GCATが
+         まだ登録していないISS放出物）が Proton-K に化けるのを防ぐため。
+         判定はGCAT自身が持っている＝Piece の頭（1998-067）と Launch_Tag（2024-xxx）が
+         食い違う物体を1つでも抱える便を外す。実測で39便（うちISS 531件・ミール13件）。"""
     hdr = None
     fam_idx, fam_list, lv_idx, lv_list, out = {}, [], {}, [], {}
+    mothership = set()        # 母船から放出された物体を抱える便（tagから外す）
+
+    def idx_of(lv):
+        if lv not in lv_idx:
+            fam = fams.get(lv) or lv          # ファミリーが無い機は形態名をそのまま使う
+            if fam not in fam_idx:
+                fam_idx[fam] = len(fam_list)
+                fam_list.append(fam)
+            lv_idx[lv] = len(lv_list)
+            lv_list.append([lv, fam_idx[fam]])
+        return lv_idx[lv]
     for line in open(path, encoding='utf-8', errors='replace'):
         if line.startswith('#JCAT'):
             hdr = line.rstrip('\n').split('\t')
@@ -266,18 +294,23 @@ def build_lv_index(path, lvs, fams):
         n = g(r, 'Satcat').lstrip('0')                               # NORAD番号(ゼロ埋めなし)
         if not n.isdigit():
             continue
-        lv = lvs.get(g(r, 'Launch_Tag'))
+        tag_of_obj = g(r, 'Launch_Tag')
+        m = PIECE_RE.match(g(r, 'Piece'))
+        if m and m.group(1) != tag_of_obj:
+            mothership.add(m.group(1))
+        lv = lvs.get(tag_of_obj)
         if not lv:
             continue
-        if lv not in lv_idx:
-            fam = fams.get(lv) or lv
-            if fam not in fam_idx:
-                fam_idx[fam] = len(fam_list)
-                fam_list.append(fam)
-            lv_idx[lv] = len(lv_list)
-            lv_list.append([lv, fam_idx[fam]])
-        out[n] = lv_idx[lv]
-    return {'fam': fam_list, 'lv': lv_list, 'map': out}
+        out[n] = idx_of(lv)
+
+    # 打上げ番号の索引。軌道打上げの形（1957-001 / 2026-192）だけ入れる
+    # ＝観測ロケット等の 'YYYY XXX' 形式は国際識別子と突き合わせられないので除く。
+    tag = {}
+    for t, lv in lvs.items():
+        if TAG_RE.match(t) and t not in mothership:
+            tag[t] = idx_of(lv)
+    print('  母船から放出された物体を抱える便を tag から除外: %d件' % len(mothership))
+    return {'fam': fam_list, 'lv': lv_list, 'map': out, 'tag': tag}
 
 
 def main():
@@ -304,8 +337,8 @@ def main():
     with open(LVX_DST, 'w', encoding='utf-8', newline='') as f:
         f.write(s2)
     print('出力: %s' % LVX_DST)
-    print('  %d件 / ロケット%d種(ファミリー%d種) / %.2f MB (gzip %.2f MB)'
-          % (len(lvx['map']), len(lvx['lv']), len(lvx['fam']),
+    print('  NORAD %d件 / 打上げ番号 %d件 / ロケット%d種(ファミリー%d種) / %.2f MB (gzip %.2f MB)'
+          % (len(lvx['map']), len(lvx['tag']), len(lvx['lv']), len(lvx['fam']),
              len(s2.encode('utf-8')) / 1048576,
              len(gzip.compress(s2.encode('utf-8'))) / 1048576))
 
